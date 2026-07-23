@@ -1,0 +1,4 @@
+[submodule "libs/Qt5"]
+	path = libs/Qt5
+	url = https://github.com/qt/qt5
+	branch = dev
