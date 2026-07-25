@@ -12,7 +12,7 @@ jobs:
 
     steps:
       - name: Checkout repo with submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -24,7 +24,7 @@ jobs:
           find . -maxdepth 3 -type d | sort
 
       - name: Cache Qt5 build
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: qt-static
           key: qt5-static-${{ runner.os }}-v1
@@ -92,7 +92,7 @@ jobs:
           ls -lh ${{ github.workspace }}/qt-static/lib/ | head -20
 
       - name: Upload Qt5 static build
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: qt5-static-${{ runner.os }}-${{ github.run_id }}
           path: qt-static/
