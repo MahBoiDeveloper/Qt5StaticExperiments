@@ -11,11 +11,13 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout repo with submodules
+      - name: Checkout repo with submodules recursively
         uses: actions/checkout@v5
         with:
           submodules: recursive
+          lfs: true
           fetch-depth: 0
+          show-progress: true
 
       - name: Show repository tree
         run: |
@@ -48,7 +50,7 @@ jobs:
         run: |
           test -d libs/Qt5 || (echo "Qt5 submodule not found!" && exit 1)
           test -f libs/Qt5/configure || (echo "configure script not found!" && exit 1)
-          echo "✓ Qt5 submodule verified"
+          echo "Qt5 submodule verified"
 
       - name: Configure Qt5 static build
         working-directory: ./libs/Qt5
