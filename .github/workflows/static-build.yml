@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
       - name: Checkout repo with submodules
@@ -22,6 +23,14 @@ jobs:
           ls -la
           find . -maxdepth 3 -type d | sort
 
+      - name: Cache Qt5 build
+        uses: actions/cache@v3
+        with:
+          path: qt-static
+          key: qt5-static-${{ runner.os }}-${{ hashFiles('libs/Qt5/.git/HEAD') }}
+          restore-keys: |
+            qt5-static-${{ runner.os }}-
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -34,6 +43,12 @@ jobs:
             libxcb-xinerama0-dev libxcb-randr0-dev libxcb-image0-dev \
             libxcb-keysyms1-dev libxcb-icccm4-dev libxcb-shape0-dev \
             libxcb-sync-dev libxcb-xfixes0-dev
+
+      - name: Verify Qt5 submodule exists
+        run: |
+          test -d libs/Qt5 || (echo "Qt5 submodule not found!" && exit 1)
+          test -f libs/Qt5/configure || (echo "configure script not found!" && exit 1)
+          echo "✓ Qt5 submodule verified"
 
       - name: Configure Qt5 static build
         working-directory: ./libs/Qt5
@@ -51,14 +66,44 @@ jobs:
             -qt-libjpeg \
             -qt-pcre \
             -qt-freetype \
-            -qt-harfbuzz
+            -qt-harfbuzz \
+            -v || (cat config.log && exit 1)
 
       - name: Build Qt5
         working-directory: ./libs/Qt5
         run: |
-          make -j$(nproc)
+          echo "Building with $(nproc) parallel jobs..."
+          make -j$(nproc) 2>&1 | tee build.log
+          test ${PIPESTATUS[0]} -eq 0 || (tail -100 build.log && exit 1)
 
       - name: Install Qt5
         working-directory: ./libs/Qt5
         run: |
           make install
+          echo "Qt5 installation complete"
+
+      - name: Verify Qt5 installation
+        run: |
+          test -f ${{ github.workspace }}/qt-static/bin/qmake || (echo "qmake not found!" && exit 1)
+          test -d ${{ github.workspace }}/qt-static/lib || (echo "lib directory not found!" && exit 1)
+          ${{ github.workspace }}/qt-static/bin/qmake -version
+          echo "Qt5 static build verified successfully"
+          ls -lh ${{ github.workspace }}/qt-static/lib/ | head -20
+
+      - name: Upload Qt5 static build
+        uses: actions/upload-artifact@v3
+        with:
+          name: qt5-static-${{ runner.os }}-${{ github.run_id }}
+          path: qt-static/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Create build summary
+        if: success()
+        run: |
+          echo "## Qt5 Static Build Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build Date**: $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Qt5 Version**: $(${{ github.workspace }}/qt-static/bin/qmake -version | head -1)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Install Path**: qt-static/" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact**: qt5-static-${{ runner.os }}-${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
