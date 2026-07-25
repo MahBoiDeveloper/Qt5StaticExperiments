@@ -23,19 +23,11 @@ jobs:
           ls -la
           find . -maxdepth 3 -type d | sort
 
-      - name: Cache Qt5 build
-        uses: actions/cache@v5
-        with:
-          path: qt-static
-          key: qt5-static-${{ runner.os }}-v1
-          restore-keys: |
-            qt5-static-${{ runner.os }}-
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential perl python3 git pkg-config \
+            build-essential perl python3 git pkg-config cmake ninja-build \
             libgl1-mesa-dev libx11-dev libx11-xcb-dev libxcb1-dev \
             libxext-dev libxrender-dev libxi-dev libfontconfig1-dev \
             libfreetype6-dev libssl-dev zlib1g-dev \
@@ -70,16 +62,15 @@ jobs:
           test ${PIPESTATUS[0]} -eq 0 || exit 1
 
       - name: Build Qt5
-        working-directory: ./libs/Qt5
         run: |
           echo "Building with $(nproc) parallel jobs..."
-          make -j$(nproc) 2>&1 | tee build.log
+          cmake --build libs/Qt5 --parallel $(nproc) 2>&1 | tee build.log
           test ${PIPESTATUS[0]} -eq 0 || (tail -100 build.log && exit 1)
 
       - name: Install Qt5
         working-directory: ./libs/Qt5
         run: |
-          cmake --install .
+          cmake --install libs/Qt5
           echo "Qt5 installation complete"
 
       - name: Verify Qt5 installation
