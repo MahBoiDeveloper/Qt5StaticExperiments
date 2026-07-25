@@ -2,11 +2,12 @@ name: build-static-qt5
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
 
 jobs:
-  build:
+  build-linux:
+    name: build (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -84,7 +85,7 @@ jobs:
       - name: Upload Qt5 static build
         uses: actions/upload-artifact@v5
         with:
-          name: qt5-static-${{ runner.os }}-${{ github.run_id }}
+          name: qt5-static-linux-${{ github.run_id }}
           path: qt-static/
           retention-days: 30
           if-no-files-found: error
@@ -92,9 +93,114 @@ jobs:
       - name: Create build summary
         if: success()
         run: |
-          echo "## Qt5 Static Build Successful" >> $GITHUB_STEP_SUMMARY
+          echo "## Qt5 Static Build Successful (Linux)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Build Date**: $(date)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Qt5 Version**: $(${{ github.workspace }}/qt-static/bin/qmake -version | head -1)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Qt5 Version**: $(${{
+            github.workspace
+          }}/qt-static/bin/qmake -version | head -1)" >> $GITHUB_STEP_SUMMARY
           echo "- **Install Path**: qt-static/" >> $GITHUB_STEP_SUMMARY
-          echo "- **Artifact**: qt5-static-${{ runner.os }}-${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact**: qt5-static-linux-${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
+
+  build-windows:
+    name: build (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repo with submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Verify Qt5 submodule exists
+        shell: pwsh
+        run: |
+          if (!(Test-Path ./libs/Qt5)) { throw "Qt5 submodule not found!" }
+          if (!(Test-Path ./libs/Qt5/configure)) { throw "configure script not found!" }
+          "Qt5 submodule verified"
+
+      # Поднимаем окружение MSVC (для cl.exe/link.exe и т.п.)
+      - name: Setup MSVC Developer Command
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # В windows-latest обычно уже есть cmake/ninja/MSVC. Но оставим установку по желанию:
+      - name: Install build tools (if needed)
+        shell: pwsh
+        run: |
+          choco install -y ninja cmake strawberryperl
+          # Perl часто нужен для скриптов Qt/configure. На некоторых образах он уже есть.
+
+      - name: Configure Qt5 static build
+        shell: cmd
+        run: |
+          set "PREFIX=%CD%\qt-static"
+          cd libs\Qt5
+          configure ^
+            -static ^
+            -release ^
+            -opensource ^
+            -confirm-license ^
+            -nomake examples ^
+            -nomake tests ^
+            -prefix "%PREFIX%" ^
+            -qt-zlib ^
+            -qt-libpng ^
+            -qt-libjpeg ^
+            -qt-pcre ^
+            -qt-freetype ^
+            -qt-harfbuzz > configure.log 2>&1
+          if errorlevel 1 exit /b 1
+
+      - name: Build Qt5
+        shell: cmd
+        run: |
+          cmake --build libs/Qt5 --parallel %NUMBER_OF_PROCESSORS% > build.log 2>&1
+          if errorlevel 1 (
+            type build.log
+            exit /b 1
+          )
+
+      - name: Install Qt5
+        shell: cmd
+        run: |
+          cmake --install libs/Qt5 > install.log 2>&1
+          if errorlevel 1 (
+            type install.log
+            exit /b 1
+          )
+          echo Qt5 installation complete
+
+      - name: Verify Qt5 installation
+        shell: pwsh
+        run: |
+          $qmake = Join-Path $PWD "qt-static\bin\qmake.exe"
+          if (!(Test-Path $qmake)) { throw "qmake not found: $qmake" }
+          if (!(Test-Path (Join-Path $PWD "qt-static\lib"))) { throw "lib directory not found" }
+          & $qmake -version | Out-Host
+          "Qt5 static build verified successfully"
+          Get-ChildItem -Path (Join-Path $PWD "qt-static\lib") -File | Select-Object -First 20 | ForEach-Object { $_.FullName }
+
+      - name: Upload Qt5 static build
+        uses: actions/upload-artifact@v5
+        with:
+          name: qt5-static-windows-${{ github.run_id }}
+          path: qt-static/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Create build summary
+        if: success()
+        shell: pwsh
+        run: |
+          $qmake = Join-Path $PWD "qt-static\bin\qmake.exe"
+          $ver = (& $qmake -version | Select-Object -First 1).ToString()
+          Add-Content $env:GITHUB_STEP_SUMMARY "## Qt5 Static Build Successful (Windows)"
+          Add-Content $env:GITHUB_STEP_SUMMARY ""
+          Add-Content $env:GITHUB_STEP_SUMMARY "- **Build Date**: $(Get-Date)"
+          Add-Content $env:GITHUB_STEP_SUMMARY "- **Qt5 Version**: $ver"
+          Add-Content $env:GITHUB_STEP_SUMMARY "- **Install Path**: qt-static/"
+          Add-Content $env:GITHUB_STEP_SUMMARY "- **Artifact**: qt5-static-windows-${{ github.run_id }}"
