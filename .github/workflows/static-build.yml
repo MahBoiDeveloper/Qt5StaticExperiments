@@ -66,8 +66,7 @@ jobs:
             -qt-libjpeg \
             -qt-pcre \
             -qt-freetype \
-            -qt-harfbuzz \
-            -v 2>&1 | tee configure.log
+            -qt-harfbuzz 2>&1 | tee configure.log
           test ${PIPESTATUS[0]} -eq 0 || exit 1
 
       - name: Build Qt5
@@ -80,7 +79,7 @@ jobs:
       - name: Install Qt5
         working-directory: ./libs/Qt5
         run: |
-          make install
+          cmake --install .
           echo "Qt5 installation complete"
 
       - name: Verify Qt5 installation
