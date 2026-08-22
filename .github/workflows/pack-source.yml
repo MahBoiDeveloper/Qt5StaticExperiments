@@ -1,0 +1,79 @@
+name: pack-source
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  package:
+    name: Package source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository with all submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Show repository tree
+        run: |
+          pwd
+          echo "Repository contents:"
+          find . -maxdepth 3 -type d | sort
+
+      - name: Remove Git metadata
+        run: |
+          echo "Removing all .git directories..."
+          find . -type d -name .git -prune -exec rm -rf {} +
+
+          echo "Checking for remaining .git directories..."
+          if find . -type d -name .git -print -quit | grep -q .; then
+            echo "ERROR: .git directory still exists"
+            exit 1
+          fi
+
+          echo "Git metadata removed successfully"
+
+      - name: Create source archive
+        run: |
+          ARCHIVE="source-${GITHUB_SHA}.tar.gz"
+
+          tar \
+            --exclude='.git' \
+            -czf "$ARCHIVE" \
+            .
+
+          echo "Archive created:"
+          ls -lh "$ARCHIVE"
+
+          echo "Archive contents:"
+          tar -tzf "$ARCHIVE" | head -100
+
+          echo "Verifying archive contains no .git..."
+          if tar -tzf "$ARCHIVE" | grep -E '(^|/)\.git(/|$)' | grep -q .; then
+            echo "ERROR: archive contains .git"
+            exit 1
+          fi
+
+          echo "Archive verification successful"
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v5
+        with:
+          name: source-${{ github.sha }}
+          path: source-${{ github.sha }}.tar.gz
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Create build summary
+        if: success()
+        run: |
+          echo "## Source Package Created" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Commit**: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Archive**: source-${GITHUB_SHA}.tar.gz" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Git metadata**: removed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Submodules**: included recursively" >> "$GITHUB_STEP_SUMMARY"
