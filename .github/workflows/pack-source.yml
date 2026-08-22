@@ -7,9 +7,18 @@ on:
 
 jobs:
   package:
-    name: Package source
-    runs-on: ubuntu-latest
+    name: Package source (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: windows
 
     steps:
       - name: Checkout repository with all submodules
@@ -18,14 +27,52 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Show repository tree
+      # ------------------------------------------------------------
+      # Linux dependencies
+      # ------------------------------------------------------------
+
+      - name: Install 7zip
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
+
+      # ------------------------------------------------------------
+      # Show repository tree
+      # ------------------------------------------------------------
+
+      - name: Show repository tree (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
           pwd
           echo "Repository contents:"
           find . -maxdepth 3 -type d | sort
 
-      - name: Remove Git metadata
+      - name: Show repository tree (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
+          Get-Location
+          Write-Host "Repository contents:"
+          Get-ChildItem -Directory -Recurse |
+            Where-Object {
+              ($_.FullName.Split([IO.Path]::DirectorySeparatorChar).Count -
+               (Get-Location).Path.Split([IO.Path]::DirectorySeparatorChar).Count) -le 3
+            } |
+            Select-Object -ExpandProperty FullName
+
+      # ------------------------------------------------------------
+      # Remove Git metadata
+      # ------------------------------------------------------------
+
+      - name: Remove Git metadata (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -e
+
           echo "Removing all .git directories..."
           find . -type d -name .git -prune -exec rm -rf {} +
 
@@ -37,12 +84,43 @@ jobs:
 
           echo "Git metadata removed successfully"
 
-      - name: Create source archive
+      - name: Remove Git metadata (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          ARCHIVE="source-${GITHUB_SHA}.tar.gz"
+          Write-Host "Removing all .git directories..."
+
+          Get-ChildItem -Path . -Directory -Force -Recurse |
+            Where-Object { $_.Name -eq ".git" } |
+            Remove-Item -Recurse -Force
+
+          Write-Host "Checking for remaining .git directories..."
+
+          $gitDirs = Get-ChildItem -Path . -Directory -Force -Recurse |
+            Where-Object { $_.Name -eq ".git" }
+
+          if ($gitDirs) {
+            Write-Error ".git directory still exists"
+            exit 1
+          }
+
+          Write-Host "Git metadata removed successfully"
+
+      # ------------------------------------------------------------
+      # Create tar.gz
+      # ------------------------------------------------------------
+
+      - name: Create source tar.gz (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ARCHIVE: source-${{ github.sha }}-linux.tar.gz
+        run: |
+          set -e
 
           tar \
             --exclude='.git' \
+            --exclude="$ARCHIVE" \
             -czf "$ARCHIVE" \
             .
 
@@ -60,20 +138,177 @@ jobs:
 
           echo "Archive verification successful"
 
-      - name: Upload source archive
+      - name: Create source tar.gz (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ARCHIVE: source-${{ github.sha }}-windows.tar.gz
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          tar `
+            --exclude=".git" `
+            --exclude="$env:ARCHIVE" `
+            -czf "$env:ARCHIVE" `
+            .
+
+          Write-Host "Archive created:"
+          Get-Item "$env:ARCHIVE" | Format-Table Name, Length
+
+          Write-Host "Archive contents:"
+          tar -tzf "$env:ARCHIVE" | Select-Object -First 100
+
+          Write-Host "Verifying archive contains no .git..."
+          $gitEntries = tar -tzf "$env:ARCHIVE" |
+            Select-String -Pattern '(^|/)\.git(/|$)'
+
+          if ($gitEntries) {
+            Write-Error "Archive contains .git"
+            exit 1
+          }
+
+          Write-Host "Archive verification successful"
+
+      # ------------------------------------------------------------
+      # Create 7z archive
+      # ------------------------------------------------------------
+
+      - name: Create source 7z archive (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ARCHIVE: source-${{ github.sha }}-linux.7z
+        run: |
+          set -e
+
+          7z a \
+            -t7z \
+            -mx=9 \
+            "$ARCHIVE" \
+            . \
+            -xr!.git \
+            -xr!"$ARCHIVE"
+
+          echo "7z archive created:"
+          ls -lh "$ARCHIVE"
+
+          echo "Archive contents:"
+          7z l "$ARCHIVE" | head -100
+
+          echo "Verifying archive contains no .git..."
+          if 7z l "$ARCHIVE" | grep -E '(^|[[:space:]/])\.git([/[:space:]]|$)' | grep -q .; then
+            echo "ERROR: 7z archive contains .git"
+            exit 1
+          fi
+
+          echo "7z archive verification successful"
+
+      - name: Create source 7z archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ARCHIVE: source-${{ github.sha }}-windows.7z
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue
+
+          if (-not $sevenZip) {
+            $sevenZip = Get-Command 7zz.exe -ErrorAction SilentlyContinue
+          }
+
+          if (-not $sevenZip) {
+            Write-Error "7-Zip executable was not found"
+            exit 1
+          }
+
+          & $sevenZip.Source a `
+            -t7z `
+            -mx=9 `
+            "$env:ARCHIVE" `
+            "." `
+            "-xr!.git" `
+            "-xr!$env:ARCHIVE"
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "7-Zip failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
+          Write-Host "7z archive created:"
+          Get-Item "$env:ARCHIVE" | Format-Table Name, Length
+
+          Write-Host "Archive contents:"
+          & $sevenZip.Source l "$env:ARCHIVE"
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Unable to inspect 7z archive"
+            exit $LASTEXITCODE
+          }
+
+          Write-Host "Verifying archive contains no .git..."
+
+          $listing = & $sevenZip.Source l "$env:ARCHIVE" | Out-String
+
+          if ($listing -match '(^|[\\/ ])\.git([\\/ ]|$)') {
+            Write-Error "7z archive contains .git"
+            exit 1
+          }
+
+          Write-Host "7z archive verification successful"
+
+      # ------------------------------------------------------------
+      # Upload artifacts
+      # ------------------------------------------------------------
+
+      - name: Upload tar.gz archive
         uses: actions/upload-artifact@v5
         with:
-          name: source-${{ github.sha }}
-          path: source-${{ github.sha }}.tar.gz
+          name: source-${{ github.sha }}-${{ matrix.platform }}-tar-gz
+          path: source-${{ github.sha }}-${{ matrix.platform }}.tar.gz
           retention-days: 30
           if-no-files-found: error
 
-      - name: Create build summary
-        if: success()
+      - name: Upload 7z archive
+        uses: actions/upload-artifact@v5
+        with:
+          name: source-${{ github.sha }}-${{ matrix.platform }}-7z
+          path: source-${{ github.sha }}-${{ matrix.platform }}.7z
+          retention-days: 30
+          if-no-files-found: error
+
+      # ------------------------------------------------------------
+      # Build summary
+      # ------------------------------------------------------------
+
+      - name: Create build summary (Linux)
+        if: runner.os == 'Linux' && success()
+        shell: bash
         run: |
-          echo "## Source Package Created" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Commit**: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Archive**: source-${GITHUB_SHA}.tar.gz" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Git metadata**: removed" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Submodules**: included recursively" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Source Package Created"
+            echo ""
+            echo "- **Platform**: Linux"
+            echo "- **Commit**: $GITHUB_SHA"
+            echo "- **Archives:**"
+            echo "  - \`source-${GITHUB_SHA}-linux.tar.gz\`"
+            echo "  - \`source-${GITHUB_SHA}-linux.7z\`"
+            echo "- **Git metadata**: removed"
+            echo "- **Submodules**: included recursively"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create build summary (Windows)
+        if: runner.os == 'Windows' && success()
+        shell: pwsh
+        run: |
+          @"
+          ## Source Package Created
+
+          - **Platform**: Windows
+          - **Commit**: $env:GITHUB_SHA
+          - **Archives:**
+            - `source-$env:GITHUB_SHA-windows.tar.gz`
+            - `source-$env:GITHUB_SHA-windows.7z`
+          - **Git metadata**: removed
+          - **Submodules**: included recursively
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
