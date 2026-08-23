@@ -2,210 +2,450 @@ name: build-static-qt5
 
 on:
   push:
-    branches: ["main"]
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION: 5.15.19
+  QT_MODULES: >-
+    qtbase
+    qtsvg
+    qtdeclarative
+    qtimageformats
+    qttools
+    qttranslations
+    qtgraphicaleffects
+    qtquickcontrols
+    qtquickcontrols2
+    qtserialport
+    qtwebsockets
+    qtx11extras
+    qtwinextras
 
 jobs:
   build-linux:
     name: build (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
-      - name: Checkout repo with submodules
+      - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          submodules: recursive
-          fetch-depth: 0
+          fetch-depth: 1
+          submodules: false
 
-      - name: Show repository tree
+      - name: Initialize Qt 5 sources
+        shell: bash
         run: |
-          pwd
-          ls -la
-          find . -maxdepth 3 -type d | sort
+          git submodule sync -- libs/Qt5
+          git submodule update --init --depth 1 --jobs 4 -- libs/Qt5
+
+          read -r -a modules <<< "$QT_MODULES"
+          git -C libs/Qt5 submodule sync
+          git -C libs/Qt5 submodule update --init --depth 1 --jobs 4 -- "${modules[@]}"
+
+          test -f libs/Qt5/qtbase/configure
+          test ! -f libs/Qt5/qtwebengine/qtwebengine.pro
 
       - name: Install build dependencies
+        shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential perl python3 git pkg-config cmake ninja-build \
-            libgl1-mesa-dev libx11-dev libx11-xcb-dev libxcb1-dev \
-            libxext-dev libxrender-dev libxi-dev libfontconfig1-dev \
-            libfreetype6-dev libssl-dev zlib1g-dev \
-            libsqlite3-dev libdbus-1-dev \
-            libxcb-xinerama0-dev libxcb-randr0-dev libxcb-image0-dev \
-            libxcb-keysyms1-dev libxcb-icccm4-dev libxcb-shape0-dev \
-            libxcb-sync-dev libxcb-xfixes0-dev
+          packages=(
+            build-essential
+            git
+            libdbus-1-dev
+            libfontconfig1-dev
+            libfreetype6-dev
+            libgl1-mesa-dev
+            libsqlite3-dev
+            libssl-dev
+            libx11-dev
+            libx11-xcb-dev
+            libxcb-glx0-dev
+            libxcb-icccm4-dev
+            libxcb-image0-dev
+            libxcb-keysyms1-dev
+            libxcb-randr0-dev
+            libxcb-render-util0-dev
+            libxcb-shape0-dev
+            libxcb-sync-dev
+            libxcb-util-dev
+            libxcb-xfixes0-dev
+            libxcb-xinerama0-dev
+            libxcb1-dev
+            libxext-dev
+            libxi-dev
+            libxkbcommon-dev
+            libxkbcommon-x11-dev
+            libxrender-dev
+            perl
+            pkg-config
+            python3
+            zlib1g-dev
+          )
+          sudo apt-get install --no-install-recommends -y "${packages[@]}"
 
-      - name: Verify Qt5 submodule exists
+      - name: Configure Qt 5 static build
+        shell: bash
         run: |
-          test -d libs/Qt5 || (echo "Qt5 submodule not found!" && exit 1)
-          test -f libs/Qt5/configure || (echo "configure script not found!" && exit 1)
-          echo "Qt5 submodule verified"
+          mkdir -p qt-build
+          cd qt-build
 
-      - name: Configure Qt5 static build
-        working-directory: ./libs/Qt5
+          configure_args=(
+            -static
+            -release
+            -opensource
+            -confirm-license
+            -nomake examples
+            -nomake tests
+            -skip qtwebengine
+            -prefix "$GITHUB_WORKSPACE/qt-static"
+            -qt-zlib
+            -qt-libpng
+            -qt-libjpeg
+            -qt-pcre
+            -qt-freetype
+            -qt-harfbuzz
+          )
+          if ! ../libs/Qt5/configure "${configure_args[@]}" 2>&1 | tee configure.log; then
+            tail -200 configure.log
+            exit 1
+          fi
+
+      - name: Build Qt 5
+        shell: bash
         run: |
-          ./configure \
-            -static \
-            -release \
-            -opensource \
-            -confirm-license \
-            -nomake examples \
-            -nomake tests \
-            -prefix ${{ github.workspace }}/qt-static \
-            -qt-zlib \
-            -qt-libpng \
-            -qt-libjpeg \
-            -qt-pcre \
-            -qt-freetype \
-            -qt-harfbuzz 2>&1 | tee configure.log
-          test ${PIPESTATUS[0]} -eq 0 || exit 1
+          cd qt-build
+          jobs="$(nproc)"
+          echo "Building with $jobs parallel jobs"
 
-      - name: Build Qt5
+          if ! make -j"$jobs" 2>&1 | tee build.log; then
+            tail -200 build.log
+            exit 1
+          fi
+
+      - name: Install Qt 5
+        shell: bash
         run: |
-          echo "Building with $(nproc) parallel jobs..."
-          cmake --build libs/Qt5 --parallel $(nproc) 2>&1 | tee build.log
-          test ${PIPESTATUS[0]} -eq 0 || (tail -100 build.log && exit 1)
+          cd qt-build
+          if ! make install 2>&1 | tee install.log; then
+            tail -200 install.log
+            exit 1
+          fi
 
-      - name: Install Qt5
-        working-directory: ./libs/Qt5
+      - name: Verify Qt 5 installation
+        shell: bash
         run: |
-          cmake --install libs/Qt5
-          echo "Qt5 installation complete"
+          qmake="$GITHUB_WORKSPACE/qt-static/bin/qmake"
+          test -x "$qmake"
+          test -f "$GITHUB_WORKSPACE/qt-static/lib/libQt5Core.a"
+          test "$("$qmake" -query QT_VERSION)" = "$QT_VERSION"
+          "$qmake" -version
 
-      - name: Verify Qt5 installation
+      - name: Smoke-test static linking
+        shell: bash
         run: |
-          test -f ${{ github.workspace }}/qt-static/bin/qmake || (echo "qmake not found!" && exit 1)
-          test -d ${{ github.workspace }}/qt-static/lib || (echo "lib directory not found!" && exit 1)
-          ${{ github.workspace }}/qt-static/bin/qmake -version
-          echo "Qt5 static build verified successfully"
-          ls -lh ${{ github.workspace }}/qt-static/lib/ | head -20
+          mkdir -p qt-smoke
+          cd qt-smoke
 
-      - name: Upload Qt5 static build
+          source_lines=(
+            '#include <QCoreApplication>'
+            'int main(int argc, char **argv)'
+            '{'
+            '    QCoreApplication application(argc, argv);'
+            '    return application.applicationName().isNull() ? 1 : 0;'
+            '}'
+          )
+          printf '%s\n' "${source_lines[@]}" > main.cpp
+
+          project_lines=(
+            'QT += core'
+            'CONFIG += console release'
+            'CONFIG -= app_bundle'
+            'TEMPLATE = app'
+            'TARGET = qt-static-smoke'
+            'SOURCES += main.cpp'
+          )
+          printf '%s\n' "${project_lines[@]}" > qt-static-smoke.pro
+
+          "$GITHUB_WORKSPACE/qt-static/bin/qmake" qt-static-smoke.pro
+          make -j"$(nproc)"
+          ./qt-static-smoke
+          readelf -d ./qt-static-smoke > dynamic-section.log
+
+          if grep -E 'NEEDED.*libQt5.*\.so' dynamic-section.log; then
+            echo "Smoke test linked against a shared Qt library"
+            exit 1
+          fi
+
+      - name: Package Linux build
+        shell: bash
+        run: |
+          tar -C qt-static -czf "qt-$QT_VERSION-static-linux-x64.tar.gz" .
+
+      - name: Upload Qt 5 static build
         uses: actions/upload-artifact@v5
         with:
-          name: qt5-static-linux-${{ github.run_id }}
-          path: qt-static/
+          name: qt-${{ env.QT_VERSION }}-static-linux-x64
+          path: qt-${{ env.QT_VERSION }}-static-linux-x64.tar.gz
+          compression-level: 0
           retention-days: 30
           if-no-files-found: error
 
+      - name: Upload Linux diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: qt-${{ env.QT_VERSION }}-linux-diagnostics-${{ github.run_id }}
+          path: |
+            qt-build/*.log
+            qt-smoke/*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Create build summary
         if: success()
+        shell: bash
         run: |
-          echo "## Qt5 Static Build Successful (Linux)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Build Date**: $(date)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Qt5 Version**: $(${{
-            github.workspace
-          }}/qt-static/bin/qmake -version | head -1)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Install Path**: qt-static/" >> $GITHUB_STEP_SUMMARY
-          echo "- **Artifact**: qt5-static-linux-${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Qt $QT_VERSION static build"
+            echo ""
+            echo "- Platform: Linux x64"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Modules: $QT_MODULES"
+            echo "- Artifact: qt-$QT_VERSION-static-linux-x64"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build-windows:
     name: build (Windows)
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 360
 
     steps:
-      - name: Enable long paths for Git (Windows)
+      - name: Enable Git long paths
         shell: pwsh
-        run: |
-          git config --global core.longpaths true
-          
-      - name: Checkout repo with submodules
+        run: git config --global core.longpaths true
+
+      - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          submodules: recursive
-          fetch-depth: 0
+          fetch-depth: 1
+          submodules: false
 
-      - name: Verify Qt5 submodule exists
+      - name: Initialize Qt 5 sources
         shell: pwsh
         run: |
-          if (!(Test-Path ./libs/Qt5)) { throw "Qt5 submodule not found!" }
-          if (!(Test-Path ./libs/Qt5/configure)) { throw "configure script not found!" }
-          "Qt5 submodule verified"
+          $ErrorActionPreference = "Stop"
 
-      # Поднимаем окружение MSVC (для cl.exe/link.exe и т.п.)
-      - name: Setup MSVC Developer Command
+          git submodule sync -- libs/Qt5
+          if ($LASTEXITCODE -ne 0) { throw "Unable to sync the Qt supermodule" }
+
+          git submodule update --init --depth 1 --jobs 4 -- libs/Qt5
+          if ($LASTEXITCODE -ne 0) { throw "Unable to initialize the Qt supermodule" }
+
+          $modules = $env:QT_MODULES -split '\s+' | Where-Object { $_ }
+          git -C libs/Qt5 submodule sync
+          if ($LASTEXITCODE -ne 0) { throw "Unable to sync Qt modules" }
+
+          git -C libs/Qt5 submodule update --init --depth 1 --jobs 4 -- $modules
+          if ($LASTEXITCODE -ne 0) { throw "Unable to initialize Qt modules" }
+
+          if (!(Test-Path "libs/Qt5/qtbase/configure.bat")) {
+            throw "qtbase was not initialized"
+          }
+          if (Test-Path "libs/Qt5/qtwebengine/qtwebengine.pro") {
+            throw "qtwebengine must not be initialized for a static build"
+          }
+
+      - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      # В windows-latest обычно уже есть cmake/ninja/MSVC. Но оставим установку по желанию:
-      - name: Install build tools (if needed)
+      - name: Install parallel make tool
         shell: pwsh
         run: |
-          choco install -y ninja cmake strawberryperl
-          # Perl часто нужен для скриптов Qt/configure. На некоторых образах он уже есть.
+          choco install jom --version=1.1.2 --no-progress -y
+          Get-Command cl.exe, jom.exe, perl.exe | Format-Table Name, Source
 
-      - name: Configure Qt5 static build
-        shell: cmd
-        run: |
-          set "PREFIX=%CD%\qt-static"
-          cd libs\Qt5
-          configure ^
-            -static ^
-            -release ^
-            -opensource ^
-            -confirm-license ^
-            -nomake examples ^
-            -nomake tests ^
-            -prefix "%PREFIX%" ^
-            -qt-zlib ^
-            -qt-libpng ^
-            -qt-libjpeg ^
-            -qt-pcre ^
-            -qt-freetype ^
-            -qt-harfbuzz > configure.log 2>&1
-          if errorlevel 1 exit /b 1
-
-      - name: Build Qt5
-        shell: cmd
-        run: |
-          cmake --build libs/Qt5 --parallel %NUMBER_OF_PROCESSORS% > build.log 2>&1
-          if errorlevel 1 (
-            type build.log
-            exit /b 1
-          )
-
-      - name: Install Qt5
-        shell: cmd
-        run: |
-          cmake --install libs/Qt5 > install.log 2>&1
-          if errorlevel 1 (
-            type install.log
-            exit /b 1
-          )
-          echo Qt5 installation complete
-
-      - name: Verify Qt5 installation
+      - name: Configure Qt 5 static build
         shell: pwsh
         run: |
-          $qmake = Join-Path $PWD "qt-static\bin\qmake.exe"
-          if (!(Test-Path $qmake)) { throw "qmake not found: $qmake" }
-          if (!(Test-Path (Join-Path $PWD "qt-static\lib"))) { throw "lib directory not found" }
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $configure = (Resolve-Path "libs/Qt5/configure.bat").Path
+          $prefix = Join-Path $env:GITHUB_WORKSPACE "qt-static"
+          $configureArguments = @(
+            "-static",
+            "-release",
+            "-opensource",
+            "-confirm-license",
+            "-nomake", "examples",
+            "-nomake", "tests",
+            "-skip", "qtwebengine",
+            "-make-tool", "jom",
+            "-prefix", $prefix,
+            "-qt-zlib",
+            "-qt-libpng",
+            "-qt-libjpeg",
+            "-qt-pcre",
+            "-qt-freetype",
+            "-qt-harfbuzz"
+          )
+
+          New-Item -ItemType Directory -Force "qt-build" | Out-Null
+          Push-Location "qt-build"
+          try {
+            & $configure @configureArguments 2>&1 |
+              Tee-Object -FilePath "configure.log"
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) {
+              Get-Content "configure.log" -Tail 200
+              throw "Qt configure failed with exit code $exitCode"
+            }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Build Qt 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $jobs = [int]$env:NUMBER_OF_PROCESSORS
+          if ($jobs -lt 1) { $jobs = 2 }
+
+          Push-Location "qt-build"
+          try {
+            & jom "-j$jobs" 2>&1 | Tee-Object -FilePath "build.log"
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) {
+              Get-Content "build.log" -Tail 200
+              throw "Qt build failed with exit code $exitCode"
+            }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Install Qt 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          Push-Location "qt-build"
+          try {
+            & jom install 2>&1 | Tee-Object -FilePath "install.log"
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) {
+              Get-Content "install.log" -Tail 200
+              throw "Qt install failed with exit code $exitCode"
+            }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Verify Qt 5 installation
+        shell: pwsh
+        run: |
+          $qmake = Join-Path $PWD "qt-static/bin/qmake.exe"
+          $qtCore = Join-Path $PWD "qt-static/lib/Qt5Core.lib"
+
+          if (!(Test-Path $qmake)) { throw "qmake was not installed" }
+          if (!(Test-Path $qtCore)) { throw "Qt5Core static library was not installed" }
+
+          $version = (& $qmake -query QT_VERSION).Trim()
+          if ($version -ne $env:QT_VERSION) {
+            throw "Expected Qt $env:QT_VERSION, got $version"
+          }
           & $qmake -version | Out-Host
-          "Qt5 static build verified successfully"
-          Get-ChildItem -Path (Join-Path $PWD "qt-static\lib") -File | Select-Object -First 20 | ForEach-Object { $_.FullName }
 
-      - name: Upload Qt5 static build
+      - name: Smoke-test static linking
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          New-Item -ItemType Directory -Force "qt-smoke" | Out-Null
+
+          @(
+            "#include <QCoreApplication>",
+            "int main(int argc, char **argv)",
+            "{",
+            "    QCoreApplication application(argc, argv);",
+            "    return application.applicationName().isNull() ? 1 : 0;",
+            "}"
+          ) | Set-Content -Encoding ascii "qt-smoke/main.cpp"
+
+          @(
+            "QT += core",
+            "CONFIG += console release",
+            "CONFIG -= app_bundle",
+            "TEMPLATE = app",
+            "TARGET = qt-static-smoke",
+            "SOURCES += main.cpp"
+          ) | Set-Content -Encoding ascii "qt-smoke/qt-static-smoke.pro"
+
+          Push-Location "qt-smoke"
+          try {
+            & "$env:GITHUB_WORKSPACE/qt-static/bin/qmake.exe" "qt-static-smoke.pro"
+            if ($LASTEXITCODE -ne 0) { throw "Smoke-test qmake failed" }
+
+            & jom "-j$env:NUMBER_OF_PROCESSORS"
+            if ($LASTEXITCODE -ne 0) { throw "Smoke-test build failed" }
+
+            $executable = Resolve-Path "release/qt-static-smoke.exe"
+            & $executable.Path
+            if ($LASTEXITCODE -ne 0) { throw "Smoke-test executable failed" }
+
+            $dependencies = & dumpbin.exe /DEPENDENTS $executable.Path | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin failed" }
+            $dependencies | Set-Content -Encoding utf8NoBOM "dependencies.log"
+
+            if ($dependencies -match 'Qt5[^\s]*\.dll') {
+              throw "Smoke test linked against a shared Qt library"
+            }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Upload Qt 5 static build
         uses: actions/upload-artifact@v5
         with:
-          name: qt5-static-windows-${{ github.run_id }}
+          name: qt-${{ env.QT_VERSION }}-static-windows-x64
           path: qt-static/
           retention-days: 30
           if-no-files-found: error
+
+      - name: Upload Windows diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: qt-${{ env.QT_VERSION }}-windows-diagnostics-${{ github.run_id }}
+          path: |
+            qt-build/*.log
+            qt-smoke/*.log
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Create build summary
         if: success()
         shell: pwsh
         run: |
-          $qmake = Join-Path $PWD "qt-static\bin\qmake.exe"
-          $ver = (& $qmake -version | Select-Object -First 1).ToString()
-          Add-Content $env:GITHUB_STEP_SUMMARY "## Qt5 Static Build Successful (Windows)"
-          Add-Content $env:GITHUB_STEP_SUMMARY ""
-          Add-Content $env:GITHUB_STEP_SUMMARY "- **Build Date**: $(Get-Date)"
-          Add-Content $env:GITHUB_STEP_SUMMARY "- **Qt5 Version**: $ver"
-          Add-Content $env:GITHUB_STEP_SUMMARY "- **Install Path**: qt-static/"
-          Add-Content $env:GITHUB_STEP_SUMMARY "- **Artifact**: qt5-static-windows-${{ github.run_id }}"
+          @(
+            "## Qt $env:QT_VERSION static build",
+            "",
+            "- Platform: Windows x64",
+            "- Commit: $env:GITHUB_SHA",
+            "- Modules: $env:QT_MODULES",
+            "- Artifact: qt-$env:QT_VERSION-static-windows-x64"
+          ) | Add-Content $env:GITHUB_STEP_SUMMARY
